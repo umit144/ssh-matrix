@@ -20,18 +20,16 @@ archives:
 checksum:
   name_template: checksums.txt
 
-homebrew:
-  - repository:
+homebrew_casks:
+  - name: ssh-matrix
+    binaries:
+      - ssh-matrix
+    homepage: https://github.com/umit144/ssh-matrix
+    description: A terminal UI for browsing and connecting to SSH hosts
+    repository:
       owner: umit144
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    homepage: https://github.com/umit144/ssh-matrix
-    description: A terminal UI for browsing and connecting to SSH hosts
-    license: MIT
-    install: |
-      bin.install "ssh-matrix"
-    test: |
-      assert_match version.to_s, shell_output("#{bin}/ssh-matrix --version")
 
 changelog:
   use: github-native
