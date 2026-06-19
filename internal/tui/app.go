@@ -121,7 +121,7 @@ func (m *Model) clampScroll() {
 
 func (m Model) connectSSH() tea.Cmd {
 	host := m.hosts[m.cursor]
-	c := exec.Command("ssh", host.Name) //nolint:gosec // host.Name is from user's own ~/.ssh/config
+	c := exec.Command("ssh", host.Name)
 	return tea.ExecProcess(c, sshExecCallback)
 }
 
