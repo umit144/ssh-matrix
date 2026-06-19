@@ -13,16 +13,18 @@ builds:
       - -s -w -X main.version={{ .Version }}
 
 archives:
-  - format: tar.gz
+  - formats:
+      - tar.gz
     name_template: "{{ .ProjectName }}-{{ .Os }}-{{ .Arch }}"
 
 checksum:
   name_template: checksums.txt
 
-brews:
+homebrew:
   - repository:
       owner: umit144
       name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     homepage: https://github.com/umit144/ssh-matrix
     description: A terminal UI for browsing and connecting to SSH hosts
     license: MIT
