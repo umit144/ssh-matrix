@@ -1,9 +1,9 @@
 # ssh-matrix
 
-[![CI](https://github.com/umit/ssh-matrix/actions/workflows/ci.yml/badge.svg)](https://github.com/umit/ssh-matrix/actions/workflows/ci.yml)
+[![CI](https://github.com/umit144/ssh-matrix/actions/workflows/ci.yml/badge.svg)](https://github.com/umit144/ssh-matrix/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A minimal, keyboard-driven terminal UI for browsing and connecting to SSH hosts from `~/.ssh/config`.
+A terminal UI for browsing and connecting to SSH hosts from your `~/.ssh/config`.
 
 ```
                         ssh-matrix
@@ -33,21 +33,19 @@ A minimal, keyboard-driven terminal UI for browsing and connecting to SSH hosts 
 
 ## Install
 
-**Binary** — download from [Releases](https://github.com/umit/ssh-matrix/releases/latest)
+**Homebrew**
+
+```sh
+brew install umit144/tap/ssh-matrix
+```
 
 **Go**
 
 ```sh
-go install github.com/umit/ssh-matrix@latest
+go install github.com/umit144/ssh-matrix@latest
 ```
 
-**Source**
-
-```sh
-git clone https://github.com/umit/ssh-matrix.git
-cd ssh-matrix
-make build
-```
+**Binary** — download from [Releases](https://github.com/umit144/ssh-matrix/releases/latest)
 
 ## Keybindings
 

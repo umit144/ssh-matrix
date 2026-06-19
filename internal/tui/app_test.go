@@ -8,7 +8,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/umit/ssh-matrix/internal/ssh"
+	"github.com/umit144/ssh-matrix/internal/ssh"
 )
 
 func testHosts() []ssh.Host {

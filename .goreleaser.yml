@@ -1,0 +1,35 @@
+version: 2
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}-{{ .Os }}-{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+brews:
+  - repository:
+      owner: umit144
+      name: homebrew-tap
+    homepage: https://github.com/umit144/ssh-matrix
+    description: A terminal UI for browsing and connecting to SSH hosts
+    license: MIT
+    install: |
+      bin.install "ssh-matrix"
+    test: |
+      assert_match version.to_s, shell_output("#{bin}/ssh-matrix --version")
+
+changelog:
+  use: github-native

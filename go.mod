@@ -1,4 +1,4 @@
-module github.com/umit/ssh-matrix
+module github.com/umit144/ssh-matrix
 
 go 1.26.4
 

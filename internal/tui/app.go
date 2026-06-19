@@ -8,7 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/umit/ssh-matrix/internal/ssh"
+	"github.com/umit144/ssh-matrix/internal/ssh"
 )
 
 const chromeHeight = 16

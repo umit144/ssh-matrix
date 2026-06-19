@@ -3,3 +3,4 @@ ssh-matrix-*
 *.exe
 .DS_Store
 coverage.out
+dist/

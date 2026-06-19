@@ -5,8 +5,8 @@ import (
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/umit/ssh-matrix/internal/ssh"
-	"github.com/umit/ssh-matrix/internal/tui"
+	"github.com/umit144/ssh-matrix/internal/ssh"
+	"github.com/umit144/ssh-matrix/internal/tui"
 )
 
 var version = "dev"
