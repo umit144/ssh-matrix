@@ -39,6 +39,12 @@ A terminal UI for browsing and connecting to SSH hosts from your `~/.ssh/config`
 brew install umit144/tap/ssh-matrix
 ```
 
+On macOS, you may need to remove the quarantine attribute after installation:
+
+```sh
+sudo xattr -r -d com.apple.quarantine $(which ssh-matrix)
+```
+
 **Go**
 
 ```sh
