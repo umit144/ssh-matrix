@@ -399,3 +399,144 @@ Host myhost
 		t.Errorf("User = %q, want %q", hosts[0].User, "deploy")
 	}
 }
+
+func TestWildcardSettings(t *testing.T) {
+	dir := t.TempDir()
+	config := `
+Host server-a
+    HostName 10.0.0.1
+
+Host server-b
+    HostName 10.0.0.2
+    User admin
+
+Host other
+    HostName 10.0.0.3
+
+Host server-*
+    User root
+    Port 2222
+    IdentityFile ~/.ssh/server_key
+    ProxyJump bastion
+`
+	path := filepath.Join(dir, "config")
+	os.WriteFile(path, []byte(config), 0o644)
+
+	hosts, err := parseFile(path, dir)
+	if err != nil {
+		t.Fatalf("parseFile error: %v", err)
+	}
+
+	if len(hosts) != 3 {
+		t.Fatalf("got %d hosts, want 3\nhosts: %+v", len(hosts), hosts)
+	}
+
+	if hosts[0].User != "root" {
+		t.Errorf("server-a User = %q, want %q", hosts[0].User, "root")
+	}
+	if hosts[0].Port != "2222" {
+		t.Errorf("server-a Port = %q, want %q", hosts[0].Port, "2222")
+	}
+	if hosts[0].IdentityFile != "~/.ssh/server_key" {
+		t.Errorf("server-a IdentityFile = %q, want %q", hosts[0].IdentityFile, "~/.ssh/server_key")
+	}
+	if hosts[0].ProxyJump != "bastion" {
+		t.Errorf("server-a ProxyJump = %q, want %q", hosts[0].ProxyJump, "bastion")
+	}
+
+	if hosts[1].User != "admin" {
+		t.Errorf("server-b User = %q, want %q (explicit should win)", hosts[1].User, "admin")
+	}
+	if hosts[1].Port != "2222" {
+		t.Errorf("server-b Port = %q, want %q", hosts[1].Port, "2222")
+	}
+
+	if hosts[2].User != "" {
+		t.Errorf("other User = %q, want empty (should not match server-*)", hosts[2].User)
+	}
+	if hosts[2].Port != "22" {
+		t.Errorf("other Port = %q, want %q", hosts[2].Port, "22")
+	}
+}
+
+func TestWildcardNegation(t *testing.T) {
+	dir := t.TempDir()
+	config := `
+Host server-a
+    HostName 10.0.0.1
+
+Host server-b
+    HostName 10.0.0.2
+
+Host * !server-b
+    User global
+`
+	path := filepath.Join(dir, "config")
+	os.WriteFile(path, []byte(config), 0o644)
+
+	hosts, err := parseFile(path, dir)
+	if err != nil {
+		t.Fatalf("parseFile error: %v", err)
+	}
+
+	if len(hosts) != 2 {
+		t.Fatalf("got %d hosts, want 2\nhosts: %+v", len(hosts), hosts)
+	}
+
+	if hosts[0].User != "global" {
+		t.Errorf("server-a User = %q, want %q", hosts[0].User, "global")
+	}
+	if hosts[1].User != "" {
+		t.Errorf("server-b User = %q, want empty (negated)", hosts[1].User)
+	}
+}
+
+func TestWildcardHostName(t *testing.T) {
+	dir := t.TempDir()
+	config := `
+Host myhost
+    User deploy
+
+Host my*
+    HostName 10.0.0.1
+`
+	path := filepath.Join(dir, "config")
+	os.WriteFile(path, []byte(config), 0o644)
+
+	hosts, err := parseFile(path, dir)
+	if err != nil {
+		t.Fatalf("parseFile error: %v", err)
+	}
+
+	if len(hosts) != 1 {
+		t.Fatalf("got %d hosts, want 1", len(hosts))
+	}
+	if hosts[0].HostName != "10.0.0.1" {
+		t.Errorf("HostName = %q, want %q", hosts[0].HostName, "10.0.0.1")
+	}
+}
+
+func TestWildcardNoMatch(t *testing.T) {
+	dir := t.TempDir()
+	config := `
+Host myhost
+    HostName 10.0.0.1
+
+Host other-*
+    User root
+`
+	path := filepath.Join(dir, "config")
+	os.WriteFile(path, []byte(config), 0o644)
+
+	hosts, err := parseFile(path, dir)
+	if err != nil {
+		t.Fatalf("parseFile error: %v", err)
+	}
+
+	if len(hosts) != 1 {
+		t.Fatalf("got %d hosts, want 1", len(hosts))
+	}
+	if hosts[0].User != "" {
+		t.Errorf("User = %q, want empty", hosts[0].User)
+	}
+}

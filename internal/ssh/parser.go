@@ -9,6 +9,11 @@ import (
 
 var userHomeDir = os.UserHomeDir
 
+type wildcardBlock struct {
+	patterns []string
+	settings Host
+}
+
 func ParseConfig() ([]Host, error) {
 	home, err := userHomeDir()
 	if err != nil {
@@ -25,17 +30,23 @@ func parseFile(path, home string) ([]Host, error) {
 	defer f.Close()
 
 	var hosts []Host
+	var wildcards []wildcardBlock
 	var pending []*Host
 
 	flush := func() {
+		var wcPatterns []string
 		for _, h := range pending {
 			if isWildcard(h.Name) {
+				wcPatterns = append(wcPatterns, h.Name)
 				continue
 			}
-			if h.HostName == "" {
-				h.HostName = h.Name
-			}
 			hosts = append(hosts, *h)
+		}
+		if len(wcPatterns) > 0 && len(pending) > 0 {
+			wildcards = append(wildcards, wildcardBlock{
+				patterns: wcPatterns,
+				settings: *pending[0],
+			})
 		}
 		pending = nil
 	}
@@ -57,7 +68,7 @@ func parseFile(path, home string) ([]Host, error) {
 		case "host":
 			flush()
 			for _, pattern := range splitHostPatterns(val) {
-				pending = append(pending, &Host{Name: pattern, Port: "22"})
+				pending = append(pending, &Host{Name: pattern})
 			}
 		case "match":
 			flush()
@@ -91,6 +102,8 @@ func parseFile(path, home string) ([]Host, error) {
 	}
 
 	flush()
+	applyWildcards(hosts, wildcards)
+	applyDefaults(hosts)
 	return deduplicate(hosts), scanner.Err()
 }
 
@@ -215,4 +228,59 @@ func resolveInclude(pattern, home string) ([]Host, error) {
 		hosts = append(hosts, h...)
 	}
 	return hosts, nil
+}
+
+func applyWildcards(hosts []Host, wildcards []wildcardBlock) {
+	for i := range hosts {
+		for _, wc := range wildcards {
+			if matchesPatterns(hosts[i].Name, wc.patterns) {
+				mergeSettings(&hosts[i], &wc.settings)
+			}
+		}
+	}
+}
+
+func applyDefaults(hosts []Host) {
+	for i := range hosts {
+		if hosts[i].HostName == "" {
+			hosts[i].HostName = hosts[i].Name
+		}
+		if hosts[i].Port == "" {
+			hosts[i].Port = "22"
+		}
+	}
+}
+
+func matchesPatterns(name string, patterns []string) bool {
+	matched := false
+	for _, p := range patterns {
+		if strings.HasPrefix(p, "!") {
+			if ok, _ := filepath.Match(p[1:], name); ok {
+				return false
+			}
+		} else {
+			if ok, _ := filepath.Match(p, name); ok {
+				matched = true
+			}
+		}
+	}
+	return matched
+}
+
+func mergeSettings(h, defaults *Host) {
+	if h.HostName == "" && defaults.HostName != "" {
+		h.HostName = defaults.HostName
+	}
+	if h.User == "" && defaults.User != "" {
+		h.User = defaults.User
+	}
+	if h.Port == "" && defaults.Port != "" {
+		h.Port = defaults.Port
+	}
+	if h.IdentityFile == "" && defaults.IdentityFile != "" {
+		h.IdentityFile = defaults.IdentityFile
+	}
+	if h.ProxyJump == "" && defaults.ProxyJump != "" {
+		h.ProxyJump = defaults.ProxyJump
+	}
 }
