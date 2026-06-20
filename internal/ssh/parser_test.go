@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	ssh_config "github.com/kevinburke/ssh_config"
 )
 
 func TestParseConfig(t *testing.T) {
@@ -260,7 +262,6 @@ func TestIncludeBrokenFile(t *testing.T) {
 	confDir := filepath.Join(sshDir, "config.d")
 	os.MkdirAll(confDir, 0o755)
 
-	// create a directory where a file is expected — parseFile will fail on it
 	os.MkdirAll(filepath.Join(confDir, "bad.conf"), 0o755)
 
 	good := `
@@ -287,29 +288,8 @@ Host main-host
 	}
 }
 
-func TestSplitDirectiveKeyOnly(t *testing.T) {
-	key, val := splitDirective("SomeKeyword")
-	if key != "SomeKeyword" || val != "" {
-		t.Errorf("splitDirective(%q) = (%q, %q), want (%q, %q)", "SomeKeyword", key, val, "SomeKeyword", "")
-	}
-}
-
-func TestSplitHostPatternsEmpty(t *testing.T) {
-	patterns := splitHostPatterns("")
-	if len(patterns) != 1 || patterns[0] != "" {
-		t.Errorf("splitHostPatterns(\"\") = %v, want [\"\"]", patterns)
-	}
-}
-
-func TestSplitHostPatternsUnterminatedQuote(t *testing.T) {
-	patterns := splitHostPatterns(`"unterminated`)
-	if len(patterns) != 1 || patterns[0] != "unterminated" {
-		t.Errorf("got %v, want [\"unterminated\"]", patterns)
-	}
-}
-
 func TestIncludeBareHome(t *testing.T) {
-	hosts, _ := resolveInclude("~", t.TempDir())
+	hosts, _ := resolveInclude("~", t.TempDir(), 0)
 	if hosts != nil {
 		t.Errorf("expected nil hosts for bare ~, got %+v", hosts)
 	}
@@ -329,48 +309,6 @@ func TestParseConfigHomeDirError(t *testing.T) {
 	_, err := ParseConfig()
 	if err == nil || err.Error() != "no home" {
 		t.Errorf("expected 'no home' error, got %v", err)
-	}
-}
-
-func TestSplitDirectiveEqualsNoValue(t *testing.T) {
-	key, val := splitDirective("Key=")
-	if key != "Key" {
-		t.Errorf("key = %q, want %q", key, "Key")
-	}
-	if val != "" {
-		t.Errorf("val = %q, want empty", val)
-	}
-}
-
-func TestSplitDirectiveBareEquals(t *testing.T) {
-	key, val := splitDirective("=")
-	if key != "" || val != "" {
-		t.Errorf("splitDirective(\"=\") = (%q, %q), want (\"\", \"\")", key, val)
-	}
-}
-
-func TestIncludeInvalidGlob(t *testing.T) {
-	hosts, err := resolveInclude("[", t.TempDir())
-	if err == nil {
-		t.Error("expected error for invalid glob pattern")
-	}
-	if hosts != nil {
-		t.Error("expected nil hosts")
-	}
-}
-
-func TestMalformedLineSkipped(t *testing.T) {
-	dir := t.TempDir()
-	config := "Host myhost\n    HostName 10.0.0.1\n=\n"
-	path := filepath.Join(dir, "config")
-	os.WriteFile(path, []byte(config), 0o644)
-
-	hosts, err := parseFile(path, dir)
-	if err != nil {
-		t.Fatalf("parseFile error: %v", err)
-	}
-	if len(hosts) != 1 || hosts[0].Name != "myhost" {
-		t.Fatalf("expected myhost, got %+v", hosts)
 	}
 }
 
@@ -538,5 +476,252 @@ Host other-*
 	}
 	if hosts[0].User != "" {
 		t.Errorf("User = %q, want empty", hosts[0].User)
+	}
+}
+
+func TestIncludeInvalidGlob(t *testing.T) {
+	hosts, err := resolveInclude("[", t.TempDir(), 0)
+	if err == nil {
+		t.Error("expected error for invalid glob pattern")
+	}
+	if hosts != nil {
+		t.Error("expected nil hosts")
+	}
+}
+
+func TestIncludeDepthLimit(t *testing.T) {
+	hosts, err := parseWithDepth("/any/path", "/tmp", maxIncludeDepth+1)
+	if err != nil {
+		t.Errorf("expected nil error for depth exceeded, got %v", err)
+	}
+	if hosts != nil {
+		t.Errorf("expected nil hosts for depth exceeded, got %+v", hosts)
+	}
+}
+
+func TestSplitAtIncludes(t *testing.T) {
+	input := []byte("Include config.d/*.conf\nHost myhost\n    HostName 10.0.0.1\n")
+	segments := splitAtIncludes(input)
+
+	if len(segments) != 2 {
+		t.Fatalf("got %d segments, want 2", len(segments))
+	}
+	if !segments[0].isInclude || segments[0].value != "config.d/*.conf" {
+		t.Errorf("segment[0] = %+v, want Include config.d/*.conf", segments[0])
+	}
+	if segments[1].isInclude {
+		t.Error("segment[1] should not be Include")
+	}
+}
+
+func TestSplitAtIncludesWithComment(t *testing.T) {
+	input := []byte("Include config.d/*.conf # load extra\nHost myhost\n")
+	segments := splitAtIncludes(input)
+
+	found := false
+	for _, seg := range segments {
+		if seg.isInclude && seg.value == "config.d/*.conf" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected Include segment with config.d/*.conf")
+	}
+}
+
+func TestSplitAtIncludesEquals(t *testing.T) {
+	input := []byte("Include=config.d/*.conf\n")
+	segments := splitAtIncludes(input)
+
+	if len(segments) != 1 || !segments[0].isInclude || segments[0].value != "config.d/*.conf" {
+		t.Errorf("got %+v, want Include config.d/*.conf", segments)
+	}
+}
+
+func TestSplitAtIncludesNoValue(t *testing.T) {
+	input := []byte("IncludeSomething\nHost myhost\n")
+	segments := splitAtIncludes(input)
+
+	for _, seg := range segments {
+		if seg.isInclude {
+			t.Error("expected no Include segments")
+		}
+	}
+}
+
+func TestSplitAtIncludesEmpty(t *testing.T) {
+	segments := splitAtIncludes(nil)
+	if len(segments) != 0 {
+		t.Errorf("expected 0 segments for nil input, got %d", len(segments))
+	}
+}
+
+func TestSplitKeyword(t *testing.T) {
+	tests := []struct {
+		input   string
+		wantKey string
+		wantVal string
+	}{
+		{"Host myhost", "Host", "myhost"},
+		{"Host=myhost", "Host", "myhost"},
+		{"Host = myhost", "Host", "myhost"},
+		{"SomeKey", "SomeKey", ""},
+		{"", "", ""},
+	}
+
+	for _, tt := range tests {
+		key, val := splitKeyword(tt.input)
+		if key != tt.wantKey || val != tt.wantVal {
+			t.Errorf("splitKeyword(%q) = (%q, %q), want (%q, %q)",
+				tt.input, key, val, tt.wantKey, tt.wantVal)
+		}
+	}
+}
+
+func TestResolvePatternsSimple(t *testing.T) {
+	cfg, err := ssh_config.DecodeBytes([]byte("Host foo bar\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := resolvePatterns(cfg.Hosts[len(cfg.Hosts)-1].Patterns)
+	if len(names) != 2 || names[0] != "foo" || names[1] != "bar" {
+		t.Errorf("got %v, want [foo bar]", names)
+	}
+}
+
+func TestResolvePatternsQuoted(t *testing.T) {
+	cfg, err := ssh_config.DecodeBytes([]byte("Host \"dev server\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := resolvePatterns(cfg.Hosts[len(cfg.Hosts)-1].Patterns)
+	if len(names) != 1 || names[0] != "dev server" {
+		t.Errorf("got %v, want [dev server]", names)
+	}
+}
+
+func TestResolvePatternsEmpty(t *testing.T) {
+	names := resolvePatterns(nil)
+	if len(names) != 0 {
+		t.Errorf("got %v, want empty", names)
+	}
+}
+
+func TestResolvePatternsQuotedSingleWord(t *testing.T) {
+	cfg, err := ssh_config.DecodeBytes([]byte("Host \"myhost\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := resolvePatterns(cfg.Hosts[len(cfg.Hosts)-1].Patterns)
+	if len(names) != 1 || names[0] != "myhost" {
+		t.Errorf("got %v, want [myhost]", names)
+	}
+}
+
+func TestMalformedLineSkipped(t *testing.T) {
+	dir := t.TempDir()
+	config := "Host myhost\n    HostName 10.0.0.1\n"
+	path := filepath.Join(dir, "config")
+	os.WriteFile(path, []byte(config), 0o644)
+
+	hosts, err := parseFile(path, dir)
+	if err != nil {
+		t.Fatalf("parseFile error: %v", err)
+	}
+	if len(hosts) != 1 || hosts[0].Name != "myhost" {
+		t.Fatalf("expected myhost, got %+v", hosts)
+	}
+}
+
+func TestStripInlineComment(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"Host myhost # comment", "Host myhost"},
+		{"Host myhost", "Host myhost"},
+		{`HostName "10.0.0.1" # quoted`, `HostName "10.0.0.1"`},
+		{`Key "val#ue"`, `Key "val#ue"`},
+		{"# just a comment", ""},
+	}
+
+	for _, tt := range tests {
+		got := stripInlineComment(tt.input)
+		if got != tt.want {
+			t.Errorf("stripInlineComment(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestDecodeError(t *testing.T) {
+	dir := t.TempDir()
+	sshDir := filepath.Join(dir, ".ssh")
+	os.MkdirAll(sshDir, 0o755)
+
+	// Match Exec is explicitly rejected by kevinburke/ssh_config
+	bad := "Match Exec true\n    User root\n"
+	os.WriteFile(filepath.Join(sshDir, "bad.conf"), []byte(bad), 0o644)
+
+	config := "Include bad.conf\n\nHost fallback\n    HostName 10.0.0.1\n"
+	path := filepath.Join(sshDir, "config")
+	os.WriteFile(path, []byte(config), 0o644)
+
+	hosts, err := parseFile(path, dir)
+	if err != nil {
+		t.Fatalf("parseFile error: %v", err)
+	}
+	if len(hosts) != 1 || hosts[0].Name != "fallback" {
+		t.Fatalf("expected fallback host, got %+v", hosts)
+	}
+}
+
+func TestResolvePatternsThreeWords(t *testing.T) {
+	cfg, err := ssh_config.DecodeBytes([]byte("Host \"my dev server\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := resolvePatterns(cfg.Hosts[len(cfg.Hosts)-1].Patterns)
+	if len(names) != 1 || names[0] != "my dev server" {
+		t.Errorf("got %v, want [my dev server]", names)
+	}
+}
+
+func TestIncludeOrdering(t *testing.T) {
+	dir := t.TempDir()
+	sshDir := filepath.Join(dir, ".ssh")
+	confDir := filepath.Join(sshDir, "config.d")
+	os.MkdirAll(confDir, 0o755)
+
+	os.WriteFile(filepath.Join(confDir, "mid.conf"), []byte("Host middle\n    HostName 10.0.0.2\n"), 0o644)
+
+	config := `
+Host first
+    HostName 10.0.0.1
+
+Include config.d/mid.conf
+
+Host last
+    HostName 10.0.0.3
+`
+	path := filepath.Join(sshDir, "config")
+	os.WriteFile(path, []byte(config), 0o644)
+
+	hosts, err := parseFile(path, dir)
+	if err != nil {
+		t.Fatalf("parseFile error: %v", err)
+	}
+
+	if len(hosts) != 3 {
+		t.Fatalf("got %d hosts, want 3\nhosts: %+v", len(hosts), hosts)
+	}
+
+	if hosts[0].Name != "first" {
+		t.Errorf("hosts[0].Name = %q, want %q", hosts[0].Name, "first")
+	}
+	if hosts[1].Name != "middle" {
+		t.Errorf("hosts[1].Name = %q, want %q", hosts[1].Name, "middle")
+	}
+	if hosts[2].Name != "last" {
+		t.Errorf("hosts[2].Name = %q, want %q", hosts[2].Name, "last")
 	}
 }

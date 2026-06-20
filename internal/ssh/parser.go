@@ -2,16 +2,27 @@ package ssh
 
 import (
 	"bufio"
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
+
+	ssh_config "github.com/kevinburke/ssh_config"
 )
 
 var userHomeDir = os.UserHomeDir
 
-type wildcardBlock struct {
-	patterns []string
+const maxIncludeDepth = 5
+
+type wildcardHost struct {
+	host     *ssh_config.Host
 	settings Host
+}
+
+type configSegment struct {
+	isInclude bool
+	value     string
+	data      []byte
 }
 
 func ParseConfig() ([]Host, error) {
@@ -23,88 +34,222 @@ func ParseConfig() ([]Host, error) {
 }
 
 func parseFile(path, home string) ([]Host, error) {
-	f, err := os.Open(path)
+	return parseWithDepth(path, home, 0)
+}
+
+func parseWithDepth(path, home string, depth int) ([]Host, error) {
+	if depth > maxIncludeDepth {
+		return nil, nil
+	}
+
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+
+	segments := splitAtIncludes(b)
 
 	var hosts []Host
-	var wildcards []wildcardBlock
-	var pending []*Host
+	var wildcards []wildcardHost
 
-	flush := func() {
-		var wcPatterns []string
-		for _, h := range pending {
-			if isWildcard(h.Name) {
-				wcPatterns = append(wcPatterns, h.Name)
-				continue
-			}
-			hosts = append(hosts, *h)
-		}
-		if len(wcPatterns) > 0 && len(pending) > 0 {
-			wildcards = append(wildcards, wildcardBlock{
-				patterns: wcPatterns,
-				settings: *pending[0],
-			})
-		}
-		pending = nil
-	}
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := stripComment(scanner.Text())
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		key, val := splitDirective(line)
-		if key == "" {
-			continue
-		}
-
-		switch strings.ToLower(key) {
-		case "host":
-			flush()
-			for _, pattern := range splitHostPatterns(val) {
-				pending = append(pending, &Host{Name: pattern})
-			}
-		case "match":
-			flush()
-		case "include":
-			flush()
-			included, err := resolveInclude(val, home)
+	for _, seg := range segments {
+		if seg.isInclude {
+			included, err := resolveInclude(seg.value, home, depth)
 			if err == nil {
 				hosts = append(hosts, included...)
 			}
-		case "hostname":
-			for _, h := range pending {
-				h.HostName = unquote(val)
+			continue
+		}
+
+		cfg, err := ssh_config.DecodeBytes(seg.data)
+		if err != nil {
+			continue
+		}
+
+		for _, host := range cfg.Hosts {
+			settings := extractSettings(host)
+			names := resolvePatterns(host.Patterns)
+
+			hasWildcard := false
+			for _, name := range names {
+				if isWildcard(name) {
+					hasWildcard = true
+				}
 			}
-		case "user":
-			for _, h := range pending {
-				h.User = unquote(val)
+
+			if hasWildcard {
+				wildcards = append(wildcards, wildcardHost{host: host, settings: settings})
 			}
-		case "port":
-			for _, h := range pending {
-				h.Port = unquote(val)
-			}
-		case "identityfile":
-			for _, h := range pending {
-				h.IdentityFile = unquote(val)
-			}
-		case "proxyjump":
-			for _, h := range pending {
-				h.ProxyJump = unquote(val)
+
+			for _, name := range names {
+				if name == "" || isWildcard(name) {
+					continue
+				}
+				h := settings
+				h.Name = name
+				hosts = append(hosts, h)
 			}
 		}
 	}
 
-	flush()
-	applyWildcards(hosts, wildcards)
+	for i := range hosts {
+		for _, wc := range wildcards {
+			if wc.host.Matches(hosts[i].Name) {
+				mergeSettings(&hosts[i], &wc.settings)
+			}
+		}
+	}
+
 	applyDefaults(hosts)
-	return deduplicate(hosts), scanner.Err()
+	return deduplicate(hosts), nil
+}
+
+func splitAtIncludes(b []byte) []configSegment {
+	var segments []configSegment
+	var current bytes.Buffer
+
+	scanner := bufio.NewScanner(bytes.NewReader(b))
+	for scanner.Scan() {
+		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
+		stripped := stripInlineComment(trimmed)
+		key, val := splitKeyword(stripped)
+
+		if strings.EqualFold(key, "include") && val != "" {
+			if current.Len() > 0 {
+				data := make([]byte, current.Len())
+				copy(data, current.Bytes())
+				segments = append(segments, configSegment{data: data})
+				current.Reset()
+			}
+			segments = append(segments, configSegment{isInclude: true, value: val})
+			continue
+		}
+		current.WriteString(line + "\n")
+	}
+
+	if current.Len() > 0 {
+		segments = append(segments, configSegment{data: current.Bytes()})
+	}
+
+	return segments
+}
+
+func extractSettings(host *ssh_config.Host) Host {
+	var h Host
+	for _, node := range host.Nodes {
+		kv, ok := node.(*ssh_config.KV)
+		if !ok {
+			continue
+		}
+		switch strings.ToLower(kv.Key) {
+		case "hostname":
+			h.HostName = kv.Value
+		case "user":
+			h.User = kv.Value
+		case "port":
+			h.Port = kv.Value
+		case "identityfile":
+			h.IdentityFile = kv.Value
+		case "proxyjump":
+			h.ProxyJump = kv.Value
+		}
+	}
+	return h
+}
+
+// resolvePatterns reconstructs host patterns from the parsed config,
+// handling quoted multi-word patterns that the package splits by space.
+func resolvePatterns(patterns []*ssh_config.Pattern) []string {
+	var result []string
+	i := 0
+	for i < len(patterns) {
+		name := patterns[i].String()
+		if strings.HasPrefix(name, "\"") {
+			part := strings.TrimPrefix(name, "\"")
+			if strings.HasSuffix(part, "\"") {
+				result = append(result, strings.TrimSuffix(part, "\""))
+				i++
+				continue
+			}
+			parts := []string{part}
+			i++
+			for i < len(patterns) {
+				part = patterns[i].String()
+				if strings.HasSuffix(part, "\"") {
+					parts = append(parts, strings.TrimSuffix(part, "\""))
+					i++
+					break
+				}
+				parts = append(parts, part)
+				i++
+			}
+			result = append(result, strings.Join(parts, " "))
+		} else {
+			result = append(result, name)
+			i++
+		}
+	}
+	return result
+}
+
+func stripInlineComment(s string) string {
+	inQuote := false
+	for i, c := range s {
+		if c == '"' {
+			inQuote = !inQuote
+		}
+		if c == '#' && !inQuote {
+			return strings.TrimSpace(s[:i])
+		}
+	}
+	return s
+}
+
+func splitKeyword(line string) (string, string) {
+	i := 0
+	for i < len(line) && line[i] != ' ' && line[i] != '\t' && line[i] != '=' {
+		i++
+	}
+	if i == 0 || i == len(line) {
+		return line, ""
+	}
+	key := line[:i]
+	rest := strings.TrimLeft(line[i:], " \t")
+	if rest != "" && rest[0] == '=' {
+		rest = strings.TrimLeft(rest[1:], " \t")
+	}
+	return key, rest
+}
+
+func isWildcard(pattern string) bool {
+	return strings.ContainsAny(pattern, "*?!")
+}
+
+func resolveInclude(pattern, home string, depth int) ([]Host, error) {
+	if strings.HasPrefix(pattern, "~/") {
+		pattern = filepath.Join(home, pattern[2:])
+	} else if pattern == "~" {
+		pattern = home
+	}
+	if !filepath.IsAbs(pattern) {
+		pattern = filepath.Join(home, ".ssh", pattern)
+	}
+
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return nil, err
+	}
+
+	var hosts []Host
+	for _, match := range matches {
+		h, err := parseWithDepth(match, home, depth+1)
+		if err != nil {
+			continue
+		}
+		hosts = append(hosts, h...)
+	}
+	return hosts, nil
 }
 
 func deduplicate(hosts []Host) []Host {
@@ -120,126 +265,6 @@ func deduplicate(hosts []Host) []Host {
 	return out
 }
 
-func splitDirective(line string) (string, string) {
-	key, rest := splitFirstToken(line)
-	if rest != "" {
-		return key, rest
-	}
-	if idx := strings.IndexByte(line, '='); idx != -1 {
-		k := strings.TrimSpace(line[:idx])
-		v := strings.TrimSpace(line[idx+1:])
-		if k != "" {
-			return k, v
-		}
-	}
-	return key, ""
-}
-
-func splitFirstToken(line string) (string, string) {
-	i := 0
-	for i < len(line) && line[i] != ' ' && line[i] != '\t' && line[i] != '=' {
-		i++
-	}
-	if i == len(line) {
-		return line, ""
-	}
-	key := line[:i]
-	rest := strings.TrimLeft(line[i:], " \t")
-	if rest != "" && rest[0] == '=' {
-		rest = strings.TrimLeft(rest[1:], " \t")
-	}
-	return key, rest
-}
-
-func stripComment(line string) string {
-	inQuote := false
-	for i, c := range line {
-		if c == '"' {
-			inQuote = !inQuote
-		}
-		if c == '#' && !inQuote {
-			return line[:i]
-		}
-	}
-	return line
-}
-
-func unquote(s string) string {
-	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
-		return s[1 : len(s)-1]
-	}
-	return s
-}
-
-func isWildcard(pattern string) bool {
-	return strings.ContainsAny(pattern, "*?!")
-}
-
-func splitHostPatterns(val string) []string {
-	var patterns []string
-	s := strings.TrimSpace(val)
-	for s != "" {
-		if s[0] == '"' {
-			end := strings.IndexByte(s[1:], '"')
-			if end == -1 {
-				patterns = append(patterns, s[1:])
-				break
-			}
-			patterns = append(patterns, s[1:end+1])
-			s = strings.TrimSpace(s[end+2:])
-		} else {
-			end := strings.IndexAny(s, " \t")
-			if end == -1 {
-				patterns = append(patterns, s)
-				break
-			}
-			patterns = append(patterns, s[:end])
-			s = strings.TrimSpace(s[end:])
-		}
-	}
-	if len(patterns) == 0 {
-		return []string{val}
-	}
-	return patterns
-}
-
-func resolveInclude(pattern, home string) ([]Host, error) {
-	if strings.HasPrefix(pattern, "~/") {
-		pattern = filepath.Join(home, pattern[2:])
-	} else if pattern == "~" {
-		pattern = home
-	}
-
-	if !filepath.IsAbs(pattern) {
-		pattern = filepath.Join(home, ".ssh", pattern)
-	}
-
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
-		return nil, err
-	}
-
-	var hosts []Host
-	for _, match := range matches {
-		h, err := parseFile(match, home)
-		if err != nil {
-			continue
-		}
-		hosts = append(hosts, h...)
-	}
-	return hosts, nil
-}
-
-func applyWildcards(hosts []Host, wildcards []wildcardBlock) {
-	for i := range hosts {
-		for _, wc := range wildcards {
-			if matchesPatterns(hosts[i].Name, wc.patterns) {
-				mergeSettings(&hosts[i], &wc.settings)
-			}
-		}
-	}
-}
-
 func applyDefaults(hosts []Host) {
 	for i := range hosts {
 		if hosts[i].HostName == "" {
@@ -249,22 +274,6 @@ func applyDefaults(hosts []Host) {
 			hosts[i].Port = "22"
 		}
 	}
-}
-
-func matchesPatterns(name string, patterns []string) bool {
-	matched := false
-	for _, p := range patterns {
-		if strings.HasPrefix(p, "!") {
-			if ok, _ := filepath.Match(p[1:], name); ok {
-				return false
-			}
-		} else {
-			if ok, _ := filepath.Match(p, name); ok {
-				matched = true
-			}
-		}
-	}
-	return matched
 }
 
 func mergeSettings(h, defaults *Host) {
